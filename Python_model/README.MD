@@ -10,3 +10,5 @@ conda install pytorch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 pytorch-cuda=
 
 2. 使用 cd 指令至 \TWKibo6thShare\Python_model
 pip install -r requirements.txt
+
+即完成環境安裝，完成後在 Anaconda Navigater 的 Home 中開啟 VScode
