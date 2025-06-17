@@ -1,3 +1,5 @@
+所有的 Model Weight 都是採用 320*320 進行訓練，使用者請注意輸入尺寸
+
 如果沒有 Python 環境請至 https://www.anaconda.com/download 填寫信箱
 點擊寄到信件中 Download 下載安裝檔 
 
