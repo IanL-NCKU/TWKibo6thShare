@@ -1,5 +1,6 @@
 6/19 加強 對coin 與 compass 的辨識能力
 
+非二質化資料 
 適合搭配 yolo_patrol4spot_andgettarget_ver2.java
 kibonewdata_krpc_norotwith03_retrain_cls4_rot5
 kibonewdata_krpc_norotwith03_retrain_cls45_rot5
@@ -8,6 +9,6 @@ kibomergedata_krpc_norotwith03_retrain_cls4_cos_rot5
 kibomergedata_krpc_norotwith03_retrain_cls45_cos_rot5
 
 
-
+二質化資料 
 適合搭配原版 yolo_patrol4spot_andgettarget.java 的模型還在訓練中
 將於 18:30 釋出
