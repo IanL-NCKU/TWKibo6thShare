@@ -8,7 +8,7 @@
 將 `yolo_patrol4spot_andgettarget_ver2.java` 中的 `cropEnhanceAndBinarize` 方法進行修改。
 
 
-## 修改後 (原版本)
+## 修改前 (原版本)
 
 ```java
 /**
@@ -129,7 +129,7 @@ private Mat cropEnhanceAndBinarize(Mat image, org.opencv.core.Point[] cropPoints
 ```
 
 
-## 修改前 (更新版本)
+## 修改後 (更新版本)
 
 ```java
 /**
