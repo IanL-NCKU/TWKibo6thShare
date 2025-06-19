@@ -13,6 +13,8 @@ import java.util.Map;
 import java.util.HashMap;
 import java.util.Set;
 import java.util.HashSet;
+import java.util.Collections; // Added for sorting
+import java.util.Random; // Added for fault tolerance
 
 // OpenCV imports
 import org.opencv.aruco.Dictionary;
@@ -57,6 +59,14 @@ import org.opencv.imgproc.CLAHE;
 public class YourService extends KiboRpcService {
 
     private final String TAG = this.getClass().getSimpleName();
+    private Random randomGenerator; // Added for fault tolerance
+
+    // Constants for landmark detection
+    private static final String[] ALL_LANDMARK_TYPES = {
+            "coin", "compass", "coral", "fossil", "key", "letter", "shell", "treasure_box"
+    };
+    private static final float LANDMARK_CONFIDENCE_THRESHOLD = 0.5f;
+
     private final int ASTRONAUT_AR_TAG_ID = 50; // Placeholder ID
 
     private final AreaEnum[] areaEnumsByIndex = {AreaEnum.AREA1, AreaEnum.AREA2, AreaEnum.AREA3, AreaEnum.AREA4};
@@ -97,6 +107,24 @@ public class YourService extends KiboRpcService {
             AREA_QUATERNIONS[3],                   // OZ3 facing Area 4
             new Quaternion(0f, 0f, 0.707f, 0.707f) // OZ4 facing Astronaut
     };
+
+    public static class LandmarkDetectionResult {
+        public String bestLandmarkName;
+        public float bestLandmarkConfidence;
+        public int bestLandmarkCount;
+        public List<YOLODetectionService.FinalDetection> allLandmarkDetections;
+        public Map<String, Integer> rawLandmarkQuantities; // Original structure from YOLO
+        public Set<String> treasureTypes;
+
+        public LandmarkDetectionResult() {
+            this.bestLandmarkName = null;
+            this.bestLandmarkConfidence = 0.0f;
+            this.bestLandmarkCount = 0;
+            this.allLandmarkDetections = new ArrayList<>();
+            this.rawLandmarkQuantities = new HashMap<>();
+            this.treasureTypes = new HashSet<>();
+        }
+    }
 
     @Override
     protected void runPlan1(){
@@ -163,7 +191,7 @@ public class YourService extends KiboRpcService {
                 Log.i(TAG, "Image enhancement and cropping successful for " + currentViewpointArea);
 
                 // Detect items using YOLO
-                Object[] detected_items = detectitemfromcvimg(
+                LandmarkDetectionResult landmarkDetectionResult = detectitemfromcvimg(
                         claHeBinImage,
                         0.5f,      // conf_threshold
                         "lost",    // img_type ("lost" or "target")
@@ -172,16 +200,23 @@ public class YourService extends KiboRpcService {
                         320        // img_size
                 );
 
-                Map<String, Integer> landmark_items = (Map<String, Integer>) detected_items[0];
-                Set<String> treasure_types = (Set<String>) detected_items[1];
+                Map<String, Integer> landmark_items = landmarkDetectionResult.rawLandmarkQuantities; // Using raw quantities for areaLandmarks
+                Set<String> treasure_types = landmarkDetectionResult.treasureTypes;
+                String detectedLandmarkName = landmarkDetectionResult.bestLandmarkName;
+                float detectedLandmarkConfidence = landmarkDetectionResult.bestLandmarkConfidence;
+                int detectedLandmarkCount = landmarkDetectionResult.bestLandmarkCount;
+                List<YOLODetectionService.FinalDetection> allFoundLandmarkCandidates = landmarkDetectionResult.allLandmarkDetections;
 
-                Log.i(TAG, currentViewpointArea + " - Landmark quantities: " + landmark_items);
+                Log.i(TAG, currentViewpointArea + " - Best Landmark: " + detectedLandmarkName + " (Conf: " + detectedLandmarkConfidence + ", Count: " + detectedLandmarkCount + ")");
+                Log.i(TAG, currentViewpointArea + " - Raw Landmark quantities: " + landmark_items);
                 Log.i(TAG, currentViewpointArea + " - Treasure types: " + treasure_types);
+                Log.i(TAG, currentViewpointArea + " - All landmark candidates: " + (allFoundLandmarkCandidates != null ? allFoundLandmarkCandidates.size() : 0));
+
 
                 // Store results for later use
                 areaLandmarks.put("area" + currentViewpointApiId, landmark_items); // Use currentViewpointApiId
                 foundTreasures.addAll(treasure_types);
-                foundLandmarks.addAll(landmark_items.keySet());
+                // foundLandmarks.addAll(landmark_items.keySet()); // REMOVED - will be populated by new logic
 
                 // Ensure areaTreasure has an entry for this areaId
                 if (!areaTreasure.containsKey(currentViewpointApiId)) {
@@ -194,17 +229,76 @@ public class YourService extends KiboRpcService {
                 // Clean up the processed image
                 claHeBinImage.release();
 
-                // SET AREA INFO FOR THIS AREA
-                String[] firstLandmark = getFirstLandmarkItem(landmark_items);
-                if (firstLandmark != null) {
-                    String currentlandmark_name = firstLandmark[0];
-                    int landmarkCount = Integer.parseInt(firstLandmark[1]);
-                    api.setAreaInfo(currentViewpointApiId, currentlandmark_name, landmarkCount);
-                    Log.i(TAG, String.format("Set AreaInfo for %s (API ID: %d): %s x %d",
-                            currentViewpointArea.name(), currentViewpointApiId, currentlandmark_name, landmarkCount));
+                // SET AREA INFO FOR THIS AREA - New Fault Tolerance Logic
+                String landmarkToReport = "unknown"; // Default
+                int countToReport = 0; // Default
+
+                if (detectedLandmarkName != null && detectedLandmarkConfidence >= LANDMARK_CONFIDENCE_THRESHOLD) {
+                    landmarkToReport = detectedLandmarkName;
+                    countToReport = detectedLandmarkCount > 0 ? detectedLandmarkCount : 1; // Ensure count is at least 1
+                    Log.i(TAG, "High confidence detection for " + currentViewpointArea + ": " + landmarkToReport + " (conf: " + detectedLandmarkConfidence + "), count: " + countToReport);
                 } else {
-                    Log.w(TAG, currentViewpointArea + ": No landmark items detected to set AreaInfo.");
-                    api.setAreaInfo(currentViewpointApiId, "unknown", 0);
+                    Log.w(TAG, currentViewpointArea + ": Landmark detection failed, confidence low (" + detectedLandmarkConfidence + " for " + detectedLandmarkName + "), or no landmark detected. Activating fault tolerance.");
+
+                    String guessType = null;
+
+                    // Strategy B: Highest confidence candidate from current image, if not already reported
+                    if (allFoundLandmarkCandidates != null && !allFoundLandmarkCandidates.isEmpty()) {
+                        // allFoundLandmarkCandidates is already sorted by confidence
+                        for (YOLODetectionService.FinalDetection candidate : allFoundLandmarkCandidates) {
+                            String candidateName = YOLODetectionService.getClassName(candidate.classId);
+                            if (candidateName != null && !foundLandmarks.contains(candidateName)) {
+                                guessType = candidateName;
+                                Log.i(TAG, "Fault Tolerance (Strategy B) for " + currentViewpointArea + ": Selected non-reported candidate '" + guessType + "' (conf: " + candidate.confidence + ")");
+                                break;
+                            }
+                        }
+                    }
+
+                    // Strategy A: Random unreported if Strategy B failed or yielded no new item
+                    if (guessType == null) {
+                        List<String> unreportedLandmarks = getUnreportedLandmarkTypes(foundLandmarks);
+                        if (!unreportedLandmarks.isEmpty()) {
+                            if (this.randomGenerator == null) { // Initialize if null
+                                this.randomGenerator = new Random();
+                            }
+                            guessType = unreportedLandmarks.get(this.randomGenerator.nextInt(unreportedLandmarks.size()));
+                            Log.i(TAG, "Fault Tolerance (Strategy A) for " + currentViewpointArea + ": Selected random unreported landmark '" + guessType + "' from " + unreportedLandmarks.size() + " options.");
+                        }
+                    }
+
+                    // Apply guess or fallback
+                    if (guessType != null) {
+                        landmarkToReport = guessType;
+                        countToReport = 1; // Guesses are always reported with count 1
+                    } else if (detectedLandmarkName != null) {
+                        // Fallback to original low-confidence detection if no guess could be made
+                        landmarkToReport = detectedLandmarkName;
+                        countToReport = detectedLandmarkCount > 0 ? detectedLandmarkCount : 1;
+                        Log.w(TAG, "Fault Tolerance (Fallback) for " + currentViewpointArea + ": No suitable guess. Using original low-confidence detection '" + landmarkToReport + "'");
+                    } else {
+                        // Absolute fallback: if no detection and no guess, pick the first from ALL_LANDMARK_TYPES or a default.
+                        if (ALL_LANDMARK_TYPES.length > 0) {
+                            landmarkToReport = ALL_LANDMARK_TYPES[0]; // Default to the first known landmark
+                            countToReport = 1;
+                            Log.w(TAG, "Fault Tolerance (Absolute Fallback) for " + currentViewpointArea + ": No detection and no guess. Defaulting to '" + landmarkToReport + "'");
+                        } else {
+                            landmarkToReport = "unknown"; // Final fallback
+                            countToReport = 0;
+                            Log.e(TAG, "Fault Tolerance (Critical Fallback): ALL_LANDMARK_TYPES is empty! Reporting 'unknown'.");
+                        }
+                    }
+                }
+
+                // Now, report the chosen landmark and count
+                if (!"unknown".equals(landmarkToReport) || countToReport > 0) {
+                     api.setAreaInfo(currentViewpointApiId, landmarkToReport, countToReport);
+                     Log.i(TAG, String.format("Set AreaInfo for %s (API ID: %d): %s x %d. Confidence was: %.2f",
+                             currentViewpointArea.name(), currentViewpointApiId, landmarkToReport, countToReport, detectedLandmarkConfidence));
+                     foundLandmarks.add(landmarkToReport); // Add the *actually reported* landmark to foundLandmarks
+                } else {
+                     api.setAreaInfo(currentViewpointApiId, "unknown", 0); // Explicitly report unknown, 0
+                     Log.w(TAG, currentViewpointArea + ": All detection and fallback strategies failed. Reporting 'unknown' for AreaInfo.");
                 }
                 completedAreas.add(currentViewpointArea); // Mark this area as completed
                 Log.i(TAG, currentViewpointArea + " (API ID: " + currentViewpointApiId + ") marked as completed.");
@@ -692,53 +786,81 @@ public class YourService extends KiboRpcService {
      * @param standard_nms_threshold Standard NMS threshold (e.g., 0.45f)
      * @param overlap_nms_threshold Overlap NMS threshold for intelligent NMS (e.g., 0.8f)
      * @param img_size Image size for processing (e.g., 320)
-     * @return Object array: [landmark_quantities (Map<String, Integer>), treasure_types (Set<String>)]
+     * @return LandmarkDetectionResult object containing detailed detection information.
      */
-    private Object[] detectitemfromcvimg(Mat image, float conf, String imgtype,
-                                         float standard_nms_threshold, float overlap_nms_threshold, int img_size) {
+    private LandmarkDetectionResult detectitemfromcvimg(Mat image, float conf, String imgtype,
+                                                        float standard_nms_threshold, float overlap_nms_threshold, int img_size) {
         YOLODetectionService yoloService = null;
+        LandmarkDetectionResult landmarkDetectionResult = new LandmarkDetectionResult(); // Renamed to avoid conflict
+
         try {
             Log.i(TAG, String.format("Starting YOLO detection - type: %s, conf: %.2f", imgtype, conf));
 
-            // Initialize YOLO detection service
             yoloService = new YOLODetectionService(this);
-
-            // Call detection with all parameters (matches Python simple_detection_example)
-            YOLODetectionService.EnhancedDetectionResult result = yoloService.DetectfromcvImage(
+            // Assign to yoloServiceResult, and use landmarkDetectionResult for the method's return object
+            YOLODetectionService.EnhancedDetectionResult yoloServiceResult = yoloService.DetectfromcvImage(
                     image, imgtype, conf, standard_nms_threshold, overlap_nms_threshold
             );
 
-            // Get Python-like result with class names
-            Map<String, Object> pythonResult = result.getPythonLikeResult();
+            Map<String, Object> pythonResult = yoloServiceResult.getPythonLikeResult();
 
-            // Extract landmark quantities (Map<String, Integer>) - matches Python detection['landmark_quantities']
-            Map<String, Integer> landmarkQuantities = (Map<String, Integer>) pythonResult.get("landmark_quantities");
-            if (landmarkQuantities == null) {
-                landmarkQuantities = new HashMap<>();
+            // Populate rawLandmarkQuantities
+            Map<String, Integer> rawLandmarks = (Map<String, Integer>) pythonResult.get("landmark_quantities");
+            if (rawLandmarks != null) {
+                landmarkDetectionResult.rawLandmarkQuantities.putAll(rawLandmarks);
             }
 
-            // Extract treasure quantities and get the keys (types) - matches Python detection['treasure_quantities'].keys()
-            Map<String, Integer> treasureQuantities = (Map<String, Integer>) pythonResult.get("treasure_quantities");
-            if (treasureQuantities == null) {
-                treasureQuantities = new HashMap<>();
+            // Populate treasureTypes
+            Map<String, Integer> treasureQuantitiesMap = (Map<String, Integer>) pythonResult.get("treasure_quantities");
+            if (treasureQuantitiesMap != null) {
+                landmarkDetectionResult.treasureTypes.addAll(treasureQuantitiesMap.keySet());
             }
-            Set<String> treasureTypes = new HashSet<>(treasureQuantities.keySet());
 
-            // Log results (matches Python print statements)
-            Log.i(TAG, "Landmark quantities: " + landmarkQuantities);
-            Log.i(TAG, "Treasure types: " + treasureTypes);
+            // Populate allLandmarkDetections
+            if (yoloServiceResult.getDetections() != null) {
+                for (YOLODetectionService.FinalDetection detection : yoloServiceResult.getDetections()) {
+                    if (YOLODetectionService.LANDMARK_IDS.contains(detection.classId)) {
+                        landmarkDetectionResult.allLandmarkDetections.add(detection);
+                    }
+                }
+            }
 
-            // Return as array: [landmark_quantities, treasure_types]
-            // This matches Python: report_landmark.append(detection['landmark_quantities'])
-            //                     store_treasure.append(detection['treasure_quantities'].keys())
-            return new Object[]{landmarkQuantities, treasureTypes};
+            // Sort landmarks by confidence (descending)
+            if (landmarkDetectionResult.allLandmarkDetections != null) {
+                 Collections.sort(landmarkDetectionResult.allLandmarkDetections, (d1, d2) -> Float.compare(d2.confidence, d1.confidence));
+            }
+
+            // Determine best landmark and its count
+            if (landmarkDetectionResult.allLandmarkDetections != null && !landmarkDetectionResult.allLandmarkDetections.isEmpty()) {
+                YOLODetectionService.FinalDetection topLandmarkDetection = landmarkDetectionResult.allLandmarkDetections.get(0);
+                landmarkDetectionResult.bestLandmarkName = YOLODetectionService.getClassName(topLandmarkDetection.classId);
+                landmarkDetectionResult.bestLandmarkConfidence = topLandmarkDetection.confidence;
+
+                int count = 0;
+                for (YOLODetectionService.FinalDetection ld : landmarkDetectionResult.allLandmarkDetections) {
+                    if (ld.classId == topLandmarkDetection.classId) {
+                        count++;
+                    }
+                }
+                landmarkDetectionResult.bestLandmarkCount = count;
+            }
+
+            Log.i(TAG, "Raw Landmark quantities: " + landmarkDetectionResult.rawLandmarkQuantities);
+            Log.i(TAG, "Treasure types: " + landmarkDetectionResult.treasureTypes);
+            Log.i(TAG, "All landmark detections count: " + (landmarkDetectionResult.allLandmarkDetections != null ? landmarkDetectionResult.allLandmarkDetections.size() : 0));
+            if (landmarkDetectionResult.bestLandmarkName != null) {
+                Log.i(TAG, String.format("Best landmark: %s, Confidence: %.2f, Count: %d",
+                        landmarkDetectionResult.bestLandmarkName, landmarkDetectionResult.bestLandmarkConfidence, landmarkDetectionResult.bestLandmarkCount));
+            } else {
+                Log.i(TAG, "No best landmark identified.");
+            }
+
+            return landmarkDetectionResult;
 
         } catch (Exception e) {
             Log.e(TAG, "Error in detectitemfromcvimg: " + e.getMessage(), e);
-            // Return empty results on error
-            return new Object[]{new HashMap<String, Integer>(), new HashSet<String>()};
+            return new LandmarkDetectionResult(); // Return a new, empty object
         } finally {
-            // Clean up YOLO service
             if (yoloService != null) {
                 yoloService.close();
             }
@@ -1268,6 +1390,21 @@ public class YourService extends KiboRpcService {
 
 
 
+
+    /**
+     * Returns a list of landmark types from ALL_LANDMARK_TYPES that are not present in the provided set.
+     * @param reportedLandmarks A set of landmark type strings that have already been reported.
+     * @return A list of unreported landmark type strings.
+     */
+    private List<String> getUnreportedLandmarkTypes(Set<String> reportedLandmarks) {
+        List<String> unreported = new ArrayList<>();
+        for (String landmarkType : ALL_LANDMARK_TYPES) {
+            if (!reportedLandmarks.contains(landmarkType)) {
+                unreported.add(landmarkType);
+            }
+        }
+        return unreported;
+    }
 
     // You can add your method.
     private String yourMethod(){
