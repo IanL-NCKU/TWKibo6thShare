@@ -57,6 +57,7 @@ import org.opencv.imgproc.CLAHE;
 public class YourService extends KiboRpcService {
 
     private final String TAG = this.getClass().getSimpleName();
+    private final int ASTRONAUT_AR_TAG_ID = 50; // Placeholder ID
 
     private final AreaEnum[] areaEnumsByIndex = {AreaEnum.AREA1, AreaEnum.AREA2, AreaEnum.AREA3, AreaEnum.AREA4};
     // private Map<Integer, AreaEnum> markerToAreaMap = new HashMap<>(); // Removed
@@ -290,21 +291,199 @@ public class YourService extends KiboRpcService {
         // ========================================================================
 
         // Move to the front of the astronaut and report rounding completion
-        Point astronautPoint = new Point(11.143d, -6.7607d, 4.9654d);
-        Quaternion astronautQuaternion = new Quaternion(0f, 0f, 0.707f, 0.707f);
+        Point astronautPoint = new Point(11.143d, -6.7607d, 4.9654d); // Defined earlier in the code
+        Quaternion astronautQuaternion = new Quaternion(0f, 0f, 0.707f, 0.707f); // Defined earlier
 
-        Log.i(TAG, "Moving to astronaut position");
-        api.moveTo(astronautPoint, astronautQuaternion, false);
-        api.reportRoundingCompletion();
+        Log.i(TAG, "Moving to astronaut position with precision enhancement...");
+        // api.moveTo(astronautPoint, astronautQuaternion, false); // Original call replaced by loop
 
-        // Error handling verify markers are visible before proceeding
-        boolean astronautMarkersOk = waitForMarkersDetection(2000, 200, "astronaut");
+        int maxMoveAttempts = 3; // Max attempts for iterative moveTo
+        double targetTolerance = 0.10; // Target tolerance in meters (10cm) before AR tag tuning
+        double currentDistance = Double.MAX_VALUE;
+        boolean initialMoveSuccessful = false;
 
-        if (astronautMarkersOk) {
-            Log.i(TAG, "Astronaut markers confirmed - proceeding with target detection");
-        } else {
-            Log.w(TAG, "Astronaut markers not detected - proceeding anyway");
+        for (int attempt = 0; attempt < maxMoveAttempts; attempt++) {
+            Log.i(TAG, String.format("Attempt %d to reach astronaut position.", attempt + 1));
+            // Use a blocking call for moveTo
+            api.moveTo(astronautPoint, astronautQuaternion, true); // Blocking call
+
+            // Get current position after move
+            Point currentPosition = api.getRobotKinematics().getPosition();
+            if (currentPosition == null) {
+                Log.w(TAG, "Failed to get robot position after move attempt.");
+                // Consider a short sleep and retry or break
+                try { Thread.sleep(200); } catch (InterruptedException e) { Log.w(TAG, "Sleep interrupted"); }
+                continue;
+            }
+
+            // Calculate distance to target
+            double dx = astronautPoint.getX() - currentPosition.getX();
+            double dy = astronautPoint.getY() - currentPosition.getY();
+            double dz = astronautPoint.getZ() - currentPosition.getZ();
+            currentDistance = Math.sqrt(dx*dx + dy*dy + dz*dz);
+
+            Log.i(TAG, String.format("Distance to astronaut target: %.3fm", currentDistance));
+
+            if (currentDistance <= targetTolerance) {
+                Log.i(TAG, "Reached astronaut position within tolerance.");
+                initialMoveSuccessful = true;
+                break; // Exit loop if within tolerance
+            } else {
+                Log.i(TAG, String.format("Not within tolerance (%.2fm). Current distance: %.3fm. Attempting relative move.", targetTolerance, currentDistance));
+                // Calculate relative move needed (robot's frame of reference for relativeMoveTo is forward, left, up)
+                // This requires transforming the world delta (dx, dy, dz) to robot's frame or simply moving along world axes if Astrobee's relativeMoveTo behaves that way for small adjustments without orientation change.
+                // For simplicity, assuming small adjustments along world axes if robot is already facing astronaut.
+                // A more precise relative move would require transforming dx,dy,dz to robot's coordinate system.
+                // However, the issue description implies using relativeMoveTo with world-based delta if already close: "api.getRobotPosition() 獲取自身位置，也能計算與Astronaut的差向量，用 relativeMoveTo() 做最後的修正移動"
+                // Assuming api.relativeMoveTo(dx, dy, dz, ...) for small corrections means dx (world X), dy (world Y), dz (world Z) if Astrobee is roughly aligned.
+                // More robust: dx_robot_frame, dy_robot_frame, dz_robot_frame.
+                // Given the context, let's try a direct relative move with world differences.
+                // The `api.relativeMoveTo` expects dx (forward), dy (left), dz (up) in robot frame.
+                // The calculated dx, dy, dz are in world frame.
+                // A proper solution would get robot's current quaternion, invert it, and rotate the world vector (dx,dy,dz).
+                // For now, as a simpler heuristic for small corrections when already mostly facing the target:
+                // If we are mostly facing the astronaut (which we should be after moveTo),
+                // a positive world Z difference (dz) might mean we need to move forward (positive relative dx).
+                // a positive world X difference (dx) might mean we are to the "left" of target, so need to move "right" (negative relative dy).
+                // a positive world Y difference (dy) might mean we are "behind" target (in world Y), so need to move "forward" in Y (could be relative dx or dy based on orientation)
+
+                // Given the complexity of frame transformation, let's use a simpler approach:
+                // Re-issue a moveTo. If the first moveTo with 'true' doesn't get us close enough,
+                // a relative move without proper frame transformation might be risky.
+                // The issue example `result = api.moveTo(astronautPoint, astronautQuat, true); loopCounter++; } while(!result.hasSucceeded() && loopCounter < 3);`
+                // suggests just retrying moveTo. Let's follow that more closely.
+
+                // So, instead of relativeMoveTo here, we just let the loop retry the absolute moveTo.
+                Log.i(TAG, "Retrying absolute moveTo.");
+                if (attempt < maxMoveAttempts -1) { // If not the last attempt
+                     try { Thread.sleep(500); } catch (InterruptedException e) { Log.w(TAG, "Sleep interrupted during retry delay"); }
+                }
+            }
         }
+
+        if (!initialMoveSuccessful) {
+            Log.w(TAG, String.format("Failed to reach astronaut position within tolerance after %d attempts. Last distance: %.3fm", maxMoveAttempts, currentDistance));
+        }
+
+        // The AR Tag fine-tuning logic added in Step 1 will follow this block.
+        // AR Tag fine-tuning logic START (This line is already present from previous step)
+        Log.i(TAG, "Attempting AR Tag fine-tuning for astronaut position.");
+        Mat astronautViewImage = api.getMatNavCam(); // Get image for AR detection
+
+        if (astronautViewImage != null && !astronautViewImage.empty()) {
+            Dictionary arucoDictionary = Aruco.getPredefinedDictionary(Aruco.DICT_5X5_250);
+            List<Mat> corners = new ArrayList<>();
+            Mat ids = new Mat();
+            Aruco.detectMarkers(astronautViewImage, arucoDictionary, corners, ids);
+
+            boolean astronautTagFound = false;
+            int targetTagIndex = -1;
+
+            if (ids.rows() > 0) {
+                for (int i = 0; i < ids.rows(); i++) {
+                    if (ids.get(i,0) != null && (int)ids.get(i,0)[0] == ASTRONAUT_AR_TAG_ID) {
+                        astronautTagFound = true;
+                        targetTagIndex = i;
+                        Log.i(TAG, "Astronaut AR Tag ID " + ASTRONAUT_AR_TAG_ID + " found.");
+                        break;
+                    }
+                }
+            }
+
+            if (astronautTagFound) {
+                double[][] intrinsics = api.getNavCamIntrinsics();
+                Mat cameraMatrix = new Mat(3, 3, CvType.CV_64F);
+                cameraMatrix.put(0, 0, intrinsics[0]); // fx, fy, cx, cy
+                Mat distCoeffs = new Mat(1, 5, CvType.CV_64F);
+                distCoeffs.put(0, 0, intrinsics[1]);   // k1, k2, p1, p2, k3
+
+                List<Mat> targetCornerList = new ArrayList<>();
+                targetCornerList.add(corners.get(targetTagIndex).clone()); // Clone to avoid modifying original list elements
+
+                Mat rvecs = new Mat();
+                Mat tvecs = new Mat();
+                float markerLength = 0.05f; // Assumed marker length in meters
+
+                Aruco.estimatePoseSingleMarkers(targetCornerList, markerLength, cameraMatrix, distCoeffs, rvecs, tvecs);
+
+                if (rvecs.rows() > 0 && tvecs.rows() > 0) {
+                    Mat tvec = tvecs.row(0); // Translation vector: [x, y, z] of tag in camera frame
+                    // Camera frame: +X right, +Y down, +Z forward (into scene)
+
+                    double tag_x_cam = tvec.get(0,0)[0]; // Tag's X position in camera frame
+                    double tag_y_cam = tvec.get(0,0)[1]; // Tag's Y position in camera frame
+                    double tag_z_cam = tvec.get(0,0)[2]; // Tag's Z position (depth) in camera frame
+
+                    double desired_z_distance_to_tag = 0.2; // Target 0.2m from the tag
+
+                    // Robot's relativeMoveTo(forward, left, up, ...)
+                    // To center the tag in view (tag_x_cam = 0, tag_y_cam = 0) and achieve desired_z_distance_to_tag:
+                    // 1. Move forward by (tag_z_cam - desired_z_distance_to_tag)
+                    //    - If tag_z_cam > desired_z_distance_to_tag, robot is too far, move forward (positive dx_robot_relative).
+                    double dx_robot_relative = tag_z_cam - desired_z_distance_to_tag;
+
+                    // 2. Move left by tag_x_cam
+                    //    - If tag_x_cam > 0 (tag is to the right in image), robot needs to move left (positive dy_robot_relative).
+                    double dy_robot_relative = tag_x_cam;
+
+                    // 3. Move up by -tag_y_cam
+                    //    - If tag_y_cam > 0 (tag is down in image), robot needs to move up (positive dz_robot_relative).
+                    double dz_robot_relative = -tag_y_cam;
+
+                    Log.i(TAG, String.format("AR Tag raw offsets: tag_x_cam=%.3f, tag_y_cam=%.3f, tag_z_cam=%.3f", tag_x_cam, tag_y_cam, tag_z_cam));
+                    Log.i(TAG, String.format("AR Tag Adjustment: Calculated relative move: dx=%.3f (forward), dy=%.3f (left), dz=%.3f (up)", dx_robot_relative, dy_robot_relative, dz_robot_relative));
+
+                    // Apply safety limits to the relative move distances
+                    dx_robot_relative = Math.max(-0.3, Math.min(0.3, dx_robot_relative)); // Limit forward/backward
+                    dy_robot_relative = Math.max(-0.2, Math.min(0.2, dy_robot_relative)); // Limit left/right
+                    dz_robot_relative = Math.max(-0.2, Math.min(0.2, dz_robot_relative)); // Limit up/down
+
+                    Log.i(TAG, String.format("AR Tag Adjustment: Performing clamped relative move: dx=%.3f, dy=%.3f, dz=%.3f", dx_robot_relative, dy_robot_relative, dz_robot_relative));
+
+                    if (Math.abs(dx_robot_relative) > 0.02 || Math.abs(dy_robot_relative) > 0.02 || Math.abs(dz_robot_relative) > 0.02) { // Only move if significant
+                        api.relativeMoveTo(dx_robot_relative, dy_robot_relative, dz_robot_relative, 0, 0, 0, true); // Blocking relative move
+                        Log.i(TAG, "Relative move for AR Tag adjustment completed.");
+                    } else {
+                        Log.i(TAG, "AR Tag adjustment too small, skipping relative move.");
+                    }
+
+                } else {
+                    Log.w(TAG, "Could not estimate pose of Astronaut AR Tag ID " + ASTRONAUT_AR_TAG_ID);
+                }
+                // Release OpenCV Mats
+                cameraMatrix.release();
+                distCoeffs.release();
+                rvecs.release();
+                tvecs.release();
+                for(Mat c : targetCornerList) c.release(); // Release the cloned corner
+            } else {
+                Log.i(TAG, "Astronaut AR Tag ID " + ASTRONAUT_AR_TAG_ID + " not found in current view. Skipping AR fine-tuning.");
+            }
+
+            // Release general Mats from detection
+            for(Mat c : corners) c.release();
+            ids.release();
+            astronautViewImage.release();
+        } else {
+            Log.w(TAG, "Failed to get NavCam image for Astronaut AR Tag fine-tuning or image was empty.");
+        }
+        // AR Tag fine-tuning logic END
+
+        api.reportRoundingCompletion(); // This call remains, now after the adjustment logic.
+
+        // Commented out old astronaut marker check, as AR fine-tuning is now done before reporting.
+        // Log.i(TAG, "Moving to astronaut position");
+        // api.moveTo(astronautPoint, astronautQuaternion, false); // This is where the new code is inserted after
+        // api.reportRoundingCompletion(); // This is after the new code
+
+        // // Error handling verify markers are visible before proceeding <<<< START OF BLOCK TO COMMENT
+        // boolean astronautMarkersOk = waitForMarkersDetection(2000, 200, "astronaut");
+
+        // if (astronautMarkersOk) {
+        //     Log.i(TAG, "Astronaut markers confirmed - proceeding with target detection");
+        // } else {
+        //     Log.w(TAG, "Astronaut markers not detected - proceeding anyway");
+        // } // <<<< END OF BLOCK TO COMMENT
 
         // ========================================================================
         // TARGET ITEM RECOGNITION
