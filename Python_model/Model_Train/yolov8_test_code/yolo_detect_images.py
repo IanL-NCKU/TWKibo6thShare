@@ -2,9 +2,9 @@ import os
 import cv2
 from yoloraw_postprocessing import *
 
-model_path = r'E:\gitrepo\yolo-V8-main\runs\kibo320\krpc_aug_yolov8n_32b_cos_lr_no_rot_with03_mixup_copy_paste\weights\best.pt'
-image_base_folder = r'E:\gitrepo\yolo-V8-main\kiborpc'
-image_names = ['yolo_binary_otsu_4.png']#, 'yolo_binary_otsu_2.png']#, '0080.png', '0021.png', '0157.png']
+model_path = r'C:\Users\lexho\Documents\GitHub\TWKibo6th\Python_model\Model_Train\yolov8_weight\krpc_aug_yolov8n_32b_cos_lr_no_rot_with03_mixup_copy_paste\weights\best.pt'
+image_base_folder = r'C:\Users\lexho\Documents\GitHub\TWKibo6th\Python_model\Model_Train\yolov8_test_code'
+image_names = ['area_2_yolo_original_320x320_enhanced.png']#, 'yolo_binary_otsu_2.png']#, '0080.png', '0021.png', '0157.png']
 img_type = "lost"  # or "target"
 img_size = 320
 conf_threshold = 0.3
