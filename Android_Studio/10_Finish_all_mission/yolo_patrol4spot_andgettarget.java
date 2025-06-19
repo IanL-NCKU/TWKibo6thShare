@@ -65,6 +65,7 @@ public class YourService extends KiboRpcService {
     private static final String[] ALL_LANDMARK_TYPES = {
             "coin", "compass", "coral", "fossil", "key", "letter", "shell", "treasure_box"
     };
+    private static final String[] ALL_TREASURE_TYPES = {"crystal", "diamond", "emerald"};
     private static final float LANDMARK_CONFIDENCE_THRESHOLD = 0.5f;
 
     private final int ASTRONAUT_AR_TAG_ID = 50; // Placeholder ID
@@ -583,48 +584,191 @@ public class YourService extends KiboRpcService {
         // TARGET ITEM RECOGNITION
         // ========================================================================
 
-        // Get target item image from astronaut
+        Log.i(TAG, "=== TARGET ITEM RECOGNITION START ===");
         Mat targetImage = api.getMatNavCam();
+        if (targetImage == null || targetImage.empty()) {
+            Log.e(TAG, "Failed to get target item image from NavCam.");
+            api.notifyRecognitionItem(); // Notify anyway to proceed
+            api.takeTargetItemSnapshot(); // Attempt snapshot or default behavior
+            // Consider releasing targetImage if it's not null but empty, though usually it'd be null.
+            if (targetImage != null) targetImage.release();
+            return; // Or handle mission failure appropriately
+        }
+        api.saveMatImage(targetImage, "target_card_raw_capture.png");
 
-        // Process target image to identify what the astronaut is holding
-        String targetTreasureType = processTargetImage(targetImage, resizeSize);
 
-        if (targetTreasureType != null && !targetTreasureType.equals("unknown")) {
-            Log.i(TAG, "Target treasure identified: " + targetTreasureType);
+        // 1. Process Target Card Image with YOLO
+        // Assuming resizeSize is defined earlier in runPlan1 (e.g., new Size(320, 320))
+        // Or use a fixed size for target card processing if different. Let's assume resizeSize is available.
+        // Mat processedCardImage = imageEnhanceAndCrop(targetImage, new Size(640,480), resizeSize, AreaEnum.UNKNOWN); // Assuming UNKNOWN skips AR-based cropping
+        // For target card, a simpler enhancement might be better if AR tags are not expected or desired for cropping.
+        // Let's use detectitemfromcvimg directly on a resized/enhanced version of targetImage without ArUco cropping.
+        // For now, we pass targetImage directly to detectitemfromcvimg, assuming it handles necessary preprocessing or that image is good enough.
+        // The `detectitemfromcvimg` itself calls YOLODetectionService which preprocesses.
 
-            // Find which area contains this treasure
-            int targetAreaId = findTreasureInArea(targetTreasureType, areaTreasure);
+        LandmarkDetectionResult targetCardDetectionResult = detectitemfromcvimg(
+                targetImage, // Pass the raw target image
+                0.3f,      // conf_threshold for target card (can be adjusted)
+                "target",  // img_type
+                0.45f,     // standard_nms_threshold
+                0.8f,      // overlap_nms_threshold
+                320        // img_size (YOLO model input size)
+        );
 
-            if (targetAreaId > 0) {
-                Log.i(TAG, "Target treasure '" + targetTreasureType + "' found in Area " + targetAreaId);
+        String identifiedTreasureOnCard = null;
+        if (!targetCardDetectionResult.treasureTypes.isEmpty()) {
+            // Prioritize the first treasure type found by YOLO on the card.
+            identifiedTreasureOnCard = targetCardDetectionResult.treasureTypes.iterator().next();
+            Log.i(TAG, "YOLO directly identified treasure on card: " + identifiedTreasureOnCard);
+        } else {
+            Log.i(TAG, "YOLO did not directly identify a known treasure type on the card.");
+        }
 
-                // Notify recognition
-                api.notifyRecognitionItem();
+        List<String> identifiedLandmarksOnCard = new ArrayList<>();
+        // Sort allLandmarkDetections by confidence (already done in detectitemfromcvimg's result)
+        // List<YOLODetectionService.FinalDetection> sortedLandmarks = new ArrayList<>(targetCardDetectionResult.allLandmarkDetections);
+        // Collections.sort(sortedLandmarks, (d1, d2) -> Float.compare(d2.confidence, d1.confidence)); // Already sorted
 
-                // Move back to the target area
-                Point targetAreaPoint = AREA_POINTS[targetAreaId - 1];
-                Quaternion targetAreaQuaternion = AREA_QUATERNIONS[targetAreaId - 1];
+        for (YOLODetectionService.FinalDetection detection : targetCardDetectionResult.allLandmarkDetections) {
+            String landmarkName = YOLODetectionService.getClassName(detection.classId);
+            if (landmarkName != null && isLandmarkType(landmarkName)) { // Ensure it's a landmark
+                if (!identifiedLandmarksOnCard.contains(landmarkName)) { // Add only distinct landmarks
+                    identifiedLandmarksOnCard.add(landmarkName);
+                    Log.i(TAG, "YOLO identified landmark on card: " + landmarkName + " (conf: " + detection.confidence + ")");
+                }
+            }
+            if (identifiedLandmarksOnCard.size() >= 2) {
+                break; // We only need up to two
+            }
+        }
+        Log.i(TAG, "Identified landmarks on card: " + identifiedLandmarksOnCard);
 
-                Log.i(TAG, "Moving back to Area " + targetAreaId + " to get the treasure");
-                api.moveTo(targetAreaPoint, targetAreaQuaternion, false);
+        List<String> allItemsSeenOnCard = new ArrayList<>();
+        // Populate allItemsSeenOnCard from targetCardDetectionResult (both treasures and landmarks)
+        if (identifiedTreasureOnCard != null) { // Add the one chosen treasure
+            allItemsSeenOnCard.add(identifiedTreasureOnCard);
+        }
+        for (YOLODetectionService.FinalDetection detection : targetCardDetectionResult.allLandmarkDetections) {
+             String itemName = YOLODetectionService.getClassName(detection.classId);
+             if (itemName != null && !allItemsSeenOnCard.contains(itemName)) { // Add if not already (e.g. if treasure was also in landmark list)
+                 allItemsSeenOnCard.add(itemName);
+             }
+        }
+        // A simpler way if YOLODetectionService.EnhancedDetectionResult.getPythonLikeResult().get("all_quantities") was easily available as List<String>
+        // For now, combining identified treasures and landmarks is a good proxy for "all items seen".
+        // Or, iterate all detections in targetCardDetectionResult.allLandmarkDetections and also treasureTypes.
+        // Let's refine allItemsSeenOnCard to be more comprehensive from raw detections if possible
+        // The current `detectitemfromcvimg` returns LandmarkDetectionResult, which has `rawLandmarkQuantities` and `treasureTypes`.
+        // And `allLandmarkDetections`.
 
-                // Take a snapshot of the target item
-                api.takeTargetItemSnapshot();
+        allItemsSeenOnCard.clear(); // Clearing and repopulating for clarity
+        if (targetCardDetectionResult.rawLandmarkQuantities != null) {
+            for(String landmark : targetCardDetectionResult.rawLandmarkQuantities.keySet()) {
+                 if (targetCardDetectionResult.rawLandmarkQuantities.get(landmark) > 0) {
+                    allItemsSeenOnCard.add(landmark);
+                 }
+            }
+        }
+        if (targetCardDetectionResult.treasureTypes != null) {
+            for(String treasure : targetCardDetectionResult.treasureTypes) {
+                if (!allItemsSeenOnCard.contains(treasure)) { // Avoid duplicates if a treasure could be misclassified as a landmark
+                    allItemsSeenOnCard.add(treasure);
+                }
+            }
+        }
+        Log.i(TAG, "All distinct items YOLO reported on card: " + allItemsSeenOnCard);
 
-                Log.i(TAG, "Mission completed successfully!");
+
+        // 2. Conditional Inference Logic
+        String finalTreasureTypeForReport = null; // This will be used for logging/reporting if needed
+        AreaEnum finalTreasureArea = null;
+        Point targetAreaPoint = null;
+        Quaternion targetAreaQuaternion = null;
+
+        if (identifiedTreasureOnCard != null) {
+            Log.i(TAG, "Attempting to locate area for YOLO-identified treasure: " + identifiedTreasureOnCard);
+            // Check if this treasure was found during patrol
+            int areaIdFromPatrol = findTreasureInArea(identifiedTreasureOnCard, areaTreasure); // areaTreasure is from patrol phase
+            if (areaIdFromPatrol > 0) {
+                finalTreasureArea = areaEnumsByIndex[areaIdFromPatrol - 1]; // areaEnumsByIndex defined in class
+                finalTreasureTypeForReport = identifiedTreasureOnCard;
+                Log.i(TAG, "YOLO-identified treasure '" + identifiedTreasureOnCard + "' was found in Area " + finalTreasureArea + " during patrol.");
             } else {
-                Log.w(TAG, "Target treasure '" + targetTreasureType + "' not found in any area");
-                api.notifyRecognitionItem();
+                Log.w(TAG, "YOLO-identified treasure '" + identifiedTreasureOnCard + "' was NOT found in any area during patrol. This is unexpected if card is correct.");
+                // Fallback: if YOLO identified a treasure on card, but we didn't see it in patrol,
+                // we might still need to guess an area if we have landmark clues.
+                // For now, this path means direct YOLO treasure ID won't lead to an area.
+            }
+        }
+
+        // If direct YOLO treasure identification didn't yield an area, try inference with landmarks
+        if (finalTreasureArea == null) {
+            Log.i(TAG, "Direct treasure ID from card did not yield an area. Attempting inference using landmark clues.");
+            if (identifiedLandmarksOnCard.size() == 2) {
+                String landmarkClueA = identifiedLandmarksOnCard.get(0);
+                String landmarkClueB = identifiedLandmarksOnCard.get(1);
+                Log.i(TAG, "Using landmark clues for inference: " + landmarkClueA + ", " + landmarkClueB);
+
+                finalTreasureArea = inferTreasureArea(landmarkClueA, landmarkClueB, areaLandmarks, areaTreasure);
+
+                if (finalTreasureArea != null && finalTreasureArea != AreaEnum.UNKNOWN) {
+                    Log.i(TAG, "Inferred treasure area: " + finalTreasureArea);
+                    // Try to infer type, even if just for logging or if direct YOLO failed for treasure
+                    finalTreasureTypeForReport = inferTreasureType(allItemsSeenOnCard, landmarkClueA, landmarkClueB);
+                    if (finalTreasureTypeForReport == null) {
+                        finalTreasureTypeForReport = "Unknown (Area Inferred: " + finalTreasureArea.name() + ")";
+                    }
+                    Log.i(TAG, "Final treasure type for report (after inference): " + finalTreasureTypeForReport);
+                } else {
+                    Log.w(TAG, "Landmark-based inference failed to determine a valid treasure area.");
+                    finalTreasureArea = null; // Ensure it's null if UNKNOWN was returned
+                }
+            } else {
+                Log.w(TAG, "Not enough landmark clues identified on the card (" + identifiedLandmarksOnCard.size() + ") for inference.");
+            }
+        }
+
+        // 3. Action Phase
+        api.notifyRecognitionItem(); // Notify astronaut regardless of success/failure in identification
+
+        if (finalTreasureArea != null) {
+            // Convert AreaEnum to Point and Quaternion
+            // Ordinal assumes AreaEnum.AREA1 = 0, AREA2 = 1, etc.
+            // areaEnumsByIndex: AREA1, AREA2, AREA3, AREA4
+            // AREA_POINTS: index 0 for AREA1, 1 for AREA2, etc.
+            int areaIndex = -1;
+            for(int i=0; i < areaEnumsByIndex.length; ++i) {
+                if (areaEnumsByIndex[i] == finalTreasureArea) {
+                    areaIndex = i;
+                    break;
+                }
+            }
+
+            if (areaIndex != -1) {
+                targetAreaPoint = AREA_POINTS[areaIndex];
+                targetAreaQuaternion = AREA_QUATERNIONS[areaIndex];
+
+                Log.i(TAG, "Navigating to target area: " + finalTreasureArea.name() + " (" + targetAreaPoint.toString() + ")");
+                api.moveTo(targetAreaPoint, targetAreaQuaternion, true); // Blocking move
+                Log.i(TAG, "Arrived at target area. Taking snapshot.");
                 api.takeTargetItemSnapshot();
+                Log.i(TAG, "Snapshot taken for treasure: " + (finalTreasureTypeForReport != null ? finalTreasureTypeForReport : "Type Unknown") + " in Area " + finalTreasureArea.name());
+            } else {
+                 Log.e(TAG, "Could not map finalTreasureArea " + finalTreasureArea.name() + " to an index for AREA_POINTS. This should not happen.");
+                 api.takeTargetItemSnapshot(); // Take snapshot at current location as fallback
             }
         } else {
-            Log.w(TAG, "Could not identify target treasure from astronaut");
-            api.notifyRecognitionItem();
+            Log.w(TAG, "No target area determined (either by YOLO or inference). Taking snapshot at current location.");
+            // Consider a default behavior: e.g., move to a central "guess" spot or do nothing further.
+            // For now, just taking snapshot here.
             api.takeTargetItemSnapshot();
         }
 
+        Log.i(TAG, "=== TARGET ITEM RECOGNITION END ===");
         // Clean up target image
-        targetImage.release();
+        if (targetImage != null) {
+            targetImage.release();
+        }
     }
 
     @Override
@@ -1404,6 +1548,219 @@ public class YourService extends KiboRpcService {
             }
         }
         return unreported;
+    }
+
+    private boolean isLandmarkType(String item) {
+        if (item == null) return false;
+        for (String landmark : ALL_LANDMARK_TYPES) {
+            if (landmark.equalsIgnoreCase(item)) {
+                return true;
+            }
+        }
+        // Additionally, check against YOLODetectionService.CLASS_NAMES for landmark IDs
+        // This requires mapping item name to ID, then checking against YOLODetectionService.LANDMARK_IDS
+        // For simplicity here, we'll rely on ALL_LANDMARK_TYPES which should be comprehensive.
+        // A more robust check could involve YOLODetectionService.getClassName and YOLODetectionService.LANDMARK_IDS
+        // if item names might not exactly match ALL_LANDMARK_TYPES.
+        return false;
+    }
+
+    private boolean isTreasureType(String item) {
+        if (item == null) return false;
+        for (String treasure : ALL_TREASURE_TYPES) {
+            if (treasure.equalsIgnoreCase(item)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private AreaEnum areaOfLandmark(String landmarkName, Map<String, Map<String, Integer>> areaLandmarksMap) {
+        if (landmarkName == null || areaLandmarksMap == null) {
+            return AreaEnum.UNKNOWN;
+        }
+        for (Map.Entry<String, Map<String, Integer>> entry : areaLandmarksMap.entrySet()) {
+            String areaKey = entry.getKey(); // e.g., "area1", "area2"
+            Map<String, Integer> landmarksInArea = entry.getValue();
+            if (landmarksInArea != null && landmarksInArea.containsKey(landmarkName) && landmarksInArea.get(landmarkName) > 0) {
+                try {
+                    // Extract number from "areaX" and find corresponding AreaEnum
+                    int areaNum = Integer.parseInt(areaKey.replace("area", ""));
+                    for (AreaEnum ae : areaEnumsByIndex) { // areaEnumsByIndex is an existing field
+                        if (ae.getAreaId() == areaNum) {
+                            return ae;
+                        }
+                    }
+                } catch (NumberFormatException e) {
+                    Log.e(TAG, "Invalid area key format: " + areaKey, e);
+                    // Continue searching other areas
+                }
+            }
+        }
+        return AreaEnum.UNKNOWN; // Landmark not found in any area
+    }
+
+    private boolean hasMultipleDetections(AreaEnum area, Map<String, Map<String, Integer>> areaLandmarksMap, Map<Integer, Set<String>> areaTreasureMap) {
+        if (area == null || area == AreaEnum.UNKNOWN || areaLandmarksMap == null || areaTreasureMap == null) {
+            return false;
+        }
+        String areaKey = "area" + area.getAreaId();
+        Map<String, Integer> landmarksInArea = areaLandmarksMap.get(areaKey);
+        Set<String> treasuresInArea = areaTreasureMap.get(area.getAreaId());
+
+        boolean hasLandmark = landmarksInArea != null && !landmarksInArea.isEmpty();
+        boolean hasTreasure = treasuresInArea != null && !treasuresInArea.isEmpty();
+
+        // Condition for "multiple objects": at least one landmark AND at least one treasure were detected by YOLO in this area's ROI.
+        return hasLandmark && hasTreasure;
+    }
+
+    private AreaEnum inferTreasureArea(String landmarkClueA, String landmarkClueB, Map<String, Map<String, Integer>> areaLandmarksMap, Map<Integer, Set<String>> areaTreasureMap) {
+        Log.i(TAG, "Inferring treasure area with clues: " + landmarkClueA + ", " + landmarkClueB);
+
+        AreaEnum areaA = areaOfLandmark(landmarkClueA, areaLandmarksMap);
+        AreaEnum areaB = areaOfLandmark(landmarkClueB, areaLandmarksMap);
+
+        Log.i(TAG, "Landmark " + landmarkClueA + " found in area: " + areaA);
+        Log.i(TAG, "Landmark " + landmarkClueB + " found in area: " + areaB);
+
+        if (areaA == AreaEnum.UNKNOWN && areaB == AreaEnum.UNKNOWN) {
+            Log.w(TAG, "Both landmark clues (" + landmarkClueA + ", " + landmarkClueB + ") not found in any area during patrol.");
+            return AreaEnum.UNKNOWN;
+        }
+        if (areaA == AreaEnum.UNKNOWN) { // Only B is known
+            Log.w(TAG, "Landmark clue " + landmarkClueA + " not found. Assuming treasure is with " + landmarkClueB + " in " + areaB);
+            return areaB;
+        }
+        if (areaB == AreaEnum.UNKNOWN) { // Only A is known
+            Log.w(TAG, "Landmark clue " + landmarkClueB + " not found. Assuming treasure is with " + landmarkClueA + " in " + areaA);
+            return areaA;
+        }
+
+        // From this point, both areaA and areaB are known areas (not UNKNOWN)
+        if (areaA == areaB) {
+            Log.w(TAG, "Both landmark clues " + landmarkClueA + " and " + landmarkClueB + " point to the same area: " + areaA + ". This is unusual. Assuming this area is the treasure area.");
+            return areaA;
+        }
+
+        boolean areaAMulti = hasMultipleDetections(areaA, areaLandmarksMap, areaTreasureMap);
+        boolean areaBMulti = hasMultipleDetections(areaB, areaLandmarksMap, areaTreasureMap);
+
+        Log.i(TAG, "Area " + areaA + " multiple detections: " + areaAMulti);
+        Log.i(TAG, "Area " + areaB + " multiple detections: " + areaBMulti);
+
+        if (areaAMulti && !areaBMulti) {
+            Log.i(TAG, "Area " + areaA + " had multiple detections, " + areaB + " did not. Inferring treasure in " + areaA);
+            return areaA;
+        } else if (!areaAMulti && areaBMulti) {
+            Log.i(TAG, "Area " + areaB + " had multiple detections, " + areaA + " did not. Inferring treasure in " + areaB);
+            return areaB;
+        } else {
+            Log.i(TAG, "Neither or both areas ("+areaA+", "+areaB+") had distinguishing multiple detections. Using distance fallback.");
+            Point currentPos = api.getRobotKinematics().getPosition();
+            if (currentPos == null) {
+                 Log.e(TAG, "Cannot get current robot position for distance fallback.");
+                 // Fallback: if areaA is known (which it is at this point), prefer it. Otherwise, areaB (also known).
+                 // This case should ideally not be reached if areaA/areaB were UNKNOWN initially.
+                 // Given prior checks, areaA and areaB must be valid AreaEnums here.
+                 Log.w(TAG, "Defaulting to " + areaA + " due to missing position data for distance calculation.");
+                 return areaA; // Or areaB, or a predefined preference. areaA is as good as any.
+            }
+
+            // areaA and areaB are guaranteed to be valid AREA1-AREA4 enums here due to earlier checks.
+            Point pointA = AREA_POINTS[areaA.ordinal()];
+            Point pointB = AREA_POINTS[areaB.ordinal()];
+
+            double distA = Math.sqrt(Math.pow(currentPos.getX() - pointA.getX(), 2) +
+                                     Math.pow(currentPos.getY() - pointA.getY(), 2) +
+                                     Math.pow(currentPos.getZ() - pointA.getZ(), 2));
+            double distB = Math.sqrt(Math.pow(currentPos.getX() - pointB.getX(), 2) +
+                                     Math.pow(currentPos.getY() - pointB.getY(), 2) +
+                                     Math.pow(currentPos.getZ() - pointB.getZ(), 2));
+
+            Log.i(TAG, "Distance to " + areaA + ": " + String.format("%.2f", distA) + "m. Distance to " + areaB + ": " + String.format("%.2f", distB) + "m.");
+            if (distA <= distB) {
+                Log.i(TAG, "Choosing " + areaA + " as it's closer or equidistant.");
+                return areaA;
+            } else {
+                Log.i(TAG, "Choosing " + areaB + " as it's closer.");
+                return areaB;
+            }
+        }
+    }
+
+    /**
+     * Infers the treasure type based on items detected on the target card.
+     * This method primarily checks if YOLO detected a known treasure type on the card.
+     * A more complex inference based on landmark-treasure mappings could be added later if available.
+     *
+     * @param yoloDetectedItemsOnCard A list of all item names YOLO detected on the target card.
+     *                                This list might include landmarks and potentially a treasure type.
+     * @param landmarkClueA One of the two landmark clues identified from the card.
+     * @param landmarkClueB The other landmark clue identified from the card.
+     * @return The name of the inferred treasure type, or null if no treasure type could be reliably determined from the card detections.
+     */
+    private String inferTreasureType(List<String> yoloDetectedItemsOnCard, String landmarkClueA, String landmarkClueB) {
+        Log.i(TAG, "Attempting to infer treasure type from card detections: " + yoloDetectedItemsOnCard);
+
+        if (yoloDetectedItemsOnCard == null || yoloDetectedItemsOnCard.isEmpty()) {
+            Log.w(TAG, "No items detected by YOLO on the target card to infer treasure type from.");
+            return null;
+        }
+
+        // First, check if any of the detected items is a known treasure type.
+        for (String item : yoloDetectedItemsOnCard) {
+            if (isTreasureType(item)) {
+                // If a direct treasure detection exists, prioritize it.
+                // Ensure it's not one of the landmark clues if a treasure could be misidentified as a landmark that's also a clue.
+                // However, isTreasureType and isLandmarkType should be mutually exclusive for actual treasure items vs actual landmark items.
+                Log.i(TAG, "Directly detected treasure type on card: " + item);
+                return item;
+            }
+        }
+
+        // If no direct treasure type was found, the problem states:
+        // "JAXA有可能直接規定了哪個Landmark會跟哪個寶物在一區...如果我們收集過去樣本或從指南猜到這種對應，可直接映射。"
+        // This section would be for implementing such rules if they become known.
+        // For example:
+        // if ((landmarkClueA.equals("coin") && landmarkClueB.equals("coral")) || (landmarkClueA.equals("coral") && landmarkClueB.equals("coin"))) {
+        //     Log.i(TAG, "Inferred treasure type 'Diamond' based on 'coin' and 'coral' landmark clue combination.");
+        //     return "diamond"; // Example hypothetical rule
+        // }
+
+        // If no direct detection and no rules, we can't confidently infer the type from card items alone without more info.
+        // The problem also says: "推斷寶物類型（若有對應表則用，否則留null表示不知道也沒關係）"
+        // "其實只需要去拍就行，不必在軟體上報告名稱"
+        Log.i(TAG, "No direct treasure type detected on card, and no specific inference rules implemented for treasure type based on landmark clues alone.");
+
+        // As a simple fallback, if there's exactly one item left on the card after removing the two known landmarks,
+        // and that item is NOT a landmark itself, it *could* be the treasure, but this is speculative.
+        // For now, returning null as per "不知道也沒關係".
+        List<String> remainingItems = new ArrayList<>();
+        if (yoloDetectedItemsOnCard != null) {
+            for (String item : yoloDetectedItemsOnCard) {
+                boolean isClueA = landmarkClueA != null && landmarkClueA.equalsIgnoreCase(item);
+                boolean isClueB = landmarkClueB != null && landmarkClueB.equalsIgnoreCase(item);
+                if (!isClueA && !isClueB) {
+                    remainingItems.add(item);
+                }
+            }
+        }
+
+        if (remainingItems.size() == 1) {
+            String potentialTreasure = remainingItems.get(0);
+            if (!isLandmarkType(potentialTreasure)) {
+                // This item is not landmarkClueA, not landmarkClueB, and not any other known landmark.
+                // It might be the treasure if the YOLO model has a generic detection for it
+                // or if it's one of the ALL_TREASURE_TYPES but wasn't caught by isTreasureType (e.g. due to casing).
+                // We already checked isTreasureType, so this is more of a "this is the third, non-landmark thing".
+                Log.i(TAG, "One remaining item on card after removing clues: '" + potentialTreasure + "'. If not a landmark, it might be the treasure. For now, returning null as type inference is optional.");
+                // To be more assertive, one could return potentialTreasure here if it's in ALL_TREASURE_TYPES.
+                // But the initial loop `if (isTreasureType(item))` should have caught it.
+            }
+        }
+
+        return null; // Return null if no treasure type is confidently inferred.
     }
 
     // You can add your method.
