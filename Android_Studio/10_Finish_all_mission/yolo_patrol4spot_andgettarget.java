@@ -47,10 +47,30 @@ public class YourService extends KiboRpcService {
             new Quaternion(0f, 0f, 1f, 0f)           // Area 4
     };
 
+    // Oasis Zone coordinates and orientations
+    private final Point[] OASIS_ZONE_POINTS = {
+            new Point(11.42, -9.50, 4.94),         // Oasis Zone 1
+            new Point(11.42, -8.50, 4.94),         // Oasis Zone 2 (Placeholder)
+            new Point(11.00, -7.50, 4.50),         // Oasis Zone 3 (Placeholder)
+            new Point(10.70, -6.50, 4.50)          // Oasis Zone 4 (Placeholder)
+    };
+
+    private final Quaternion[] OASIS_ZONE_QUATERNIONS = {
+            AREA_QUATERNIONS[1],                   // OZ1 facing Area 2
+            AREA_QUATERNIONS[2],                   // OZ2 facing Area 3
+            AREA_QUATERNIONS[3],                   // OZ3 facing Area 4
+            new Quaternion(0f, 0f, 0.707f, 0.707f) // OZ4 facing Astronaut
+    };
+
     @Override
     protected void runPlan1(){
         // Log the start of the mission.
         Log.i(TAG, "Start mission");
+
+        // IMPORTANT: Mission time is critical (5-minute limit).
+        // The delays added for Oasis Zones (e.g., Thread.sleep(500)) should be adjusted
+        // based on testing to maximize Oasis Bonus without exceeding the total time.
+        // Monitor the overall mission duration carefully.
 
         // The mission starts.
         api.startMission();
@@ -163,6 +183,39 @@ public class YourService extends KiboRpcService {
             } catch (InterruptedException e) {
                 Log.w(TAG, "Sleep interrupted");
             }
+
+            // Navigate to Oasis Zones after respective Area processing
+            if (areaIndex == 0) {
+                // Navigate to Oasis Zone 1
+                Log.i(TAG, "Moving to Oasis Zone 1");
+                api.moveTo(OASIS_ZONE_POINTS[0], OASIS_ZONE_QUATERNIONS[0], false);
+                Log.i(TAG, "Arrived at Oasis Zone 1, pausing for bonus.");
+                try {
+                    Thread.sleep(500); // Configurable delay for Oasis Zone bonus
+                } catch (InterruptedException e) {
+                    Log.w(TAG, "Sleep interrupted in Oasis Zone 1");
+                }
+            } else if (areaIndex == 1) {
+                // Navigate to Oasis Zone 2
+                Log.i(TAG, "Moving to Oasis Zone 2");
+                api.moveTo(OASIS_ZONE_POINTS[1], OASIS_ZONE_QUATERNIONS[1], false);
+                Log.i(TAG, "Arrived at Oasis Zone 2, pausing for bonus.");
+                try {
+                    Thread.sleep(500); // Configurable delay for Oasis Zone bonus
+                } catch (InterruptedException e) {
+                    Log.w(TAG, "Sleep interrupted in Oasis Zone 2");
+                }
+            } else if (areaIndex == 2) {
+                // Navigate to Oasis Zone 3
+                Log.i(TAG, "Moving to Oasis Zone 3");
+                api.moveTo(OASIS_ZONE_POINTS[2], OASIS_ZONE_QUATERNIONS[2], false);
+                Log.i(TAG, "Arrived at Oasis Zone 3, pausing for bonus.");
+                try {
+                    Thread.sleep(500); // Configurable delay for Oasis Zone bonus
+                } catch (InterruptedException e) {
+                    Log.w(TAG, "Sleep interrupted in Oasis Zone 3");
+                }
+            }
         }
 
         // ========================================================================
@@ -176,6 +229,16 @@ public class YourService extends KiboRpcService {
         }
         Log.i(TAG, "All found treasures: " + foundTreasures);
         Log.i(TAG, "All found landmarks: " + foundLandmarks);  // Add this line
+
+        // Navigate to Oasis Zone 4 before moving to Astronaut
+        Log.i(TAG, "Moving to Oasis Zone 4");
+        api.moveTo(OASIS_ZONE_POINTS[3], OASIS_ZONE_QUATERNIONS[3], false);
+        Log.i(TAG, "Arrived at Oasis Zone 4, pausing for bonus.");
+        try {
+            Thread.sleep(500); // Configurable delay for Oasis Zone bonus
+        } catch (InterruptedException e) {
+            Log.w(TAG, "Sleep interrupted in Oasis Zone 4");
+        }
 
         // ========================================================================
         // ASTRONAUT INTERACTION
