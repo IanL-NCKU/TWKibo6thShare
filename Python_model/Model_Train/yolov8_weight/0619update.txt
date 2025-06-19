@@ -10,6 +10,7 @@ Android_Studio\10_Finish_all_mission\0619update.md
 也可以考慮換模型
 非二質化資料專用
 適合搭配 yolo_patrol4spot_andgettarget_ver2.java
+模型路徑
 kibonewdata_krpc_norotwith03_retrain_cls4_rot5
 kibonewdata_krpc_norotwith03_retrain_cls45_rot5
 kibonewdata_krpc_norotwith03_retrain_cls3_rot30
@@ -27,4 +28,6 @@ kibomerge2data_krpc_norotwith03_retrain_cls45_cos_rot5_mod_mosaicmixcopypaste
 
 二質化資料 
 適合搭配原版 yolo_patrol4spot_andgettarget.java 的模型還在訓練中
-將於 18:30 釋出
+適合搭配 yolo_patrol4spot_andgettarget.java
+
+將於 18:30 前釋出
