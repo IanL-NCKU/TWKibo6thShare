@@ -29,6 +29,8 @@ public class YourService extends KiboRpcService {
     // Instance variables to store detection results across areas
     private Set<String> foundTreasures = new HashSet<>();
     private Map<String, Map<String, Integer>> areaLandmarks = new HashMap<>();
+    // Reusable YOLO detection service
+    private YOLODetectionService yoloService;
     
     // Area coordinates and orientations for all 4 areas
     private final Point[] AREA_POINTS = {
@@ -52,6 +54,9 @@ public class YourService extends KiboRpcService {
         
         // The mission starts.
         api.startMission();
+
+        // Initialize YOLO service once
+        yoloService = new YOLODetectionService(this);
         
         // Initialize area treasure tracking
         Map<Integer, Set<String>> areaTreasure = new HashMap<>();
@@ -202,6 +207,11 @@ public class YourService extends KiboRpcService {
 
         // Take a snapshot of the target item.
         api.takeTargetItemSnapshot();
+
+        // Close YOLO service at mission end
+        if (yoloService != null) {
+            yoloService.close();
+        }
     }
 
     @Override
@@ -317,14 +327,16 @@ public class YourService extends KiboRpcService {
      * @param img_size Image size for processing (e.g., 320)
      * @return Object array: [landmark_quantities (Map<String, Integer>), treasure_types (Set<String>)]
      */
-    private Object[] detectitemfromcvimg(Mat image, float conf, String imgtype, 
+    private Object[] detectitemfromcvimg(Mat image, float conf, String imgtype,
                                        float standard_nms_threshold, float overlap_nms_threshold, int img_size) {
-        YOLODetectionService yoloService = null;
         try {
             Log.i(TAG, String.format("Starting YOLO detection - type: %s, conf: %.2f", imgtype, conf));
-            
-            // Initialize YOLO detection service
-            yoloService = new YOLODetectionService(this);
+
+            // Reuse initialized YOLO service
+            if (yoloService == null) {
+                Log.w(TAG, "YOLO service not initialized");
+                yoloService = new YOLODetectionService(this);
+            }
             
             // Call detection with all parameters (matches Python simple_detection_example)
             YOLODetectionService.EnhancedDetectionResult result = yoloService.DetectfromcvImage(
@@ -360,11 +372,6 @@ public class YourService extends KiboRpcService {
             Log.e(TAG, "Error in detectitemfromcvimg: " + e.getMessage(), e);
             // Return empty results on error
             return new Object[]{new HashMap<String, Integer>(), new HashSet<String>()};
-        } finally {
-            // Clean up YOLO service
-            if (yoloService != null) {
-                yoloService.close();
-            }
         }
     }
 
